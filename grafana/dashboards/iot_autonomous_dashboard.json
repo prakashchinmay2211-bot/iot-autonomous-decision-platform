@@ -1,0 +1,144 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Autonomous IoT Decision & Health Status",
+      "type": "row"
+    },
+    {
+      "id": 1,
+      "title": "Asset Health Index",
+      "type": "gauge",
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 50 },
+              { "color": "yellow", "value": 75 },
+              { "color": "green", "value": 85 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Thermal Enclosure Temperature",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 9, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Bearing Vibration (RMS)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 9, "x": 15, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "velocityms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 4.5 },
+              { "color": "red", "value": 7.0 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "id": 101,
+      "title": "Machine Learning Anomaly Detection & Hydraulic Pressure",
+      "type": "row"
+    },
+    {
+      "id": 4,
+      "title": "Hydraulic Line Pressure",
+      "type": "gauge",
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 12,
+          "unit": "bar",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 6.5 },
+              { "color": "red", "value": 8.0 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "ML Isolation Forest Anomaly Score",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 9, "x": 6, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1.0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.4 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Autonomous Actuator Dispatches & Alert History",
+      "type": "table",
+      "gridPos": { "h": 7, "w": 9, "x": 15, "y": 9 }
+    }
+  ],
+  "refresh": "2s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["iot", "machine-learning", "autonomous", "mqtt"],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "title": "Autonomous IoT Decision & Alert Management",
+  "uid": "iot-autonomous-decision-v1"
+}
