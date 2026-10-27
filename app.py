@@ -7,681 +7,433 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 
-from ml.model import IoTDecisionEngine, SensorReading
-from simulator import IoTSensorSimulator
+from ml.model import (
+    DEVICE_SPECS,
+    AssetReading,
+    IsolationForestAnomalyDetector,
+    AutonomousDecisionEngine
+)
+from simulator import MultiAssetSimulator
+from database import MongoStorageManager
 from mqtt_client import MQTTManager
 
 # Page Configuration
 st.set_page_config(
-    page_title="Autonomous IoT Decision & Alert Platform",
-    page_icon="⚡",
+    page_title="Autonomous IoT Decision and Alert Platform - ABESEC",
+    page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling for Dark Industrial Cyberpunk / High-Tech Telemetry Look
+# Custom High-Tech Industrial Dark Styling
 st.markdown("""
 <style>
+    .report-badge {
+        background: linear-gradient(135deg, #1A1C24, #2A2D3A);
+        border: 1px solid #3A3F50;
+        border-radius: 8px;
+        padding: 10px 16px;
+        margin-bottom: 12px;
+    }
     .metric-card {
         background-color: #1A1C24;
         border: 1px solid #2D3139;
-        border-radius: 10px;
-        padding: 16px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        border-radius: 8px;
+        padding: 12px;
     }
-    .status-badge-nominal {
+    .status-badge-running {
         background-color: rgba(0, 255, 163, 0.15);
         color: #00FFA3;
         border: 1px solid #00FFA3;
-        padding: 4px 10px;
-        border-radius: 6px;
+        padding: 3px 8px;
+        border-radius: 4px;
         font-weight: 600;
-        display: inline-block;
+        font-size: 0.85em;
     }
-    .status-badge-warning {
-        background-color: rgba(255, 170, 0, 0.15);
-        color: #FFAA00;
-        border: 1px solid #FFAA00;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 600;
-        display: inline-block;
-    }
-    .status-badge-critical {
-        background-color: rgba(255, 75, 75, 0.15);
+    .status-badge-fault {
+        background-color: rgba(255, 75, 75, 0.2);
         color: #FF4B4B;
         border: 1px solid #FF4B4B;
-        padding: 4px 10px;
-        border-radius: 6px;
+        padding: 3px 8px;
+        border-radius: 4px;
         font-weight: 600;
-        display: inline-block;
+        font-size: 0.85em;
         animation: pulse 1.5s infinite;
     }
     @keyframes pulse {
-        0% { opacity: 0.7; }
-        50% { opacity: 1; }
-        100% { opacity: 0.7; }
+        0% { opacity: 0.6; }
+        50% { opacity: 1.0; }
+        100% { opacity: 0.6; }
     }
-    .actuator-box {
+    .decision-card {
         background: #131722;
-        border-left: 4px solid #00FFA3;
+        border-left: 4px solid #FF4B4B;
         padding: 12px 16px;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
         border-radius: 0 8px 8px 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# Initialize Session State Singletons
+# Initialize Session State
 if "engine" not in st.session_state:
-    st.session_state.engine = IoTDecisionEngine()
+    st.session_state.engine = AutonomousDecisionEngine()
 
 if "simulator" not in st.session_state:
-    st.session_state.simulator = IoTSensorSimulator(device_id="TURBINE_PUMP_ALPHA")
+    st.session_state.simulator = MultiAssetSimulator()
 
-if "mqtt_manager" not in st.session_state:
-    mqtt_mgr = MQTTManager(broker="broker.emqx.io", port=1883)
-    mqtt_mgr.connect(timeout=1.5)
-    st.session_state.mqtt_manager = mqtt_mgr
+if "db" not in st.session_state:
+    st.session_state.db = MongoStorageManager()
 
-if "stream_active" not in st.session_state:
-    st.session_state.stream_active = True
+if "mqtt" not in st.session_state:
+    mgr = MQTTManager(broker="broker.emqx.io", port=1883)
+    mgr.connect(timeout=1.5)
+    st.session_state.mqtt = mgr
 
-if "last_reading" not in st.session_state:
-    st.session_state.last_reading = None
+if "telemetry_buffer" not in st.session_state:
+    st.session_state.telemetry_buffer = {dev_id: [] for dev_id in DEVICE_SPECS}
 
-if "last_evaluation" not in st.session_state:
-    st.session_state.last_evaluation = None
+if "auto_stream" not in st.session_state:
+    st.session_state.auto_stream = True
 
-if "pending_actions" not in st.session_state:
-    st.session_state.pending_actions = []
+if "selected_device" not in st.session_state:
+    st.session_state.selected_device = "MCH-007"
+
+
+# Student & Project Academic Header
+with st.container():
+    col_hdr1, col_hdr2 = st.columns([2.5, 1.2])
+    with col_hdr1:
+        st.title("⚡ Autonomous IoT Decision and Alert Platform")
+        st.markdown("**Closed-Loop Industrial AIoT System with ML Anomaly Detection & Actuator Protection**")
+    with col_hdr2:
+        st.markdown("""
+        <div class="report-badge">
+            <small style="color: #00FFA3;"><b>MINI PROJECT REPORT | ECE DEPT</b></small><br/>
+            <b>Student:</b> Chinmay Prakash (Roll: <code>2400320310060</code>)<br/>
+            <b>College:</b> ABES Engineering College | <b>Guide:</b> Ashish Kumar<br/>
+            <small style="color: #A0AEC0;">B.Tech 3rd Year (Batch 2024–28) • Academic Year 2026–27</small>
+        </div>
+        """, unsafe_allow_html=True)
+
+# Generate Cycle
+latest_evals = {}
+for d_id in DEVICE_SPECS:
+    reading = st.session_state.simulator.generate_reading(d_id)
+    eval_res = st.session_state.engine.process_telemetry(reading)
+    latest_evals[d_id] = eval_res
+    
+    # Store in MongoDB Collections
+    st.session_state.db.insert("telemetry", reading.to_dict())
+    st.session_state.db.insert("anomalies", {
+        "device_id": d_id,
+        "timestamp": reading.timestamp,
+        **eval_res["ml_evaluation"]
+    })
+    if eval_res["decision"]:
+        st.session_state.db.insert("decisions", eval_res["decision"])
+        # Apply feedback to simulator closed loop!
+        st.session_state.simulator.apply_actuator_feedback(d_id, eval_res["decision"]["actuator_updates"])
+    if eval_res["alert"]:
+        st.session_state.db.insert("alerts", eval_res["alert"])
+
+    # Update device states collection
+    st.session_state.db.insert("device_states", {
+        "device_id": d_id,
+        "state": reading.state,
+        "health_score": eval_res["health_score"],
+        "actuators": eval_res["actuators"],
+        "timestamp": reading.timestamp
+    })
+
+    # Buffer for live charts
+    row = {"timestamp": datetime.fromtimestamp(reading.timestamp).strftime("%H:%M:%S"), **reading.readings}
+    st.session_state.telemetry_buffer[d_id].append(row)
+    if len(st.session_state.telemetry_buffer[d_id]) > 30:
+        st.session_state.telemetry_buffer[d_id].pop(0)
+
+    # Publish to MQTT topics
+    st.session_state.mqtt.publish(f"iot/telemetry/{d_id}", reading.to_dict())
 
 
 # Sidebar Controls
-st.sidebar.image("https://img.icons8.com/isometric/100/circuit.png", width=64)
-st.sidebar.title("IoT Autonomous Control")
-st.sidebar.caption("MQTT • Node-RED • ML • Grafana • Streamlit")
+st.sidebar.title("🎛️ Asset & Test Lab")
 
-# Broker Connection Status Badge
-mqtt_status = "Connected (EMQX)" if (st.session_state.mqtt_manager.connected and not st.session_state.mqtt_manager.using_internal_broker) else "Active (In-Memory Failover)"
-st.sidebar.markdown(f"**Broker Status:** `{mqtt_status}`")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📡 Telemetry Simulation")
-
-stream_toggle = st.sidebar.toggle("Auto-Stream Telemetry", value=st.session_state.stream_active)
-st.session_state.stream_active = stream_toggle
-
-stream_speed = st.sidebar.slider("Stream Refresh Interval (s)", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("⚠️ Fault Injection Suite")
-fault_option = st.sidebar.selectbox(
-    "Inject Operating Condition:",
-    [
-        ("NONE", "🟢 Normal Operation (Nominal)"),
-        ("THERMAL_RUNAWAY", "🔥 Thermal Runaway (>85°C)"),
-        ("BEARING_DAMAGE", "⚙️ Bearing Vibration Spikes (>7.0 mm/s)"),
-        ("PRESSURE_SURGE", "💥 Hydraulic Overpressure (>8.0 bar)"),
-        ("MOTOR_OVERLOAD", "⚡ Electrical Overcurrent (>45A)"),
-        ("ML_CORRELATED_DRIFT", "🧠 Subtle Multivariate Drift (ML Anomaly)")
-    ],
-    format_func=lambda x: x[1]
-)[0]
-
-st.session_state.simulator.inject_fault(fault_option)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎛️ Operation Mode")
-op_mode = st.sidebar.radio(
-    "Decision Authority:",
-    ["autonomous", "supervised", "manual"],
-    format_func=lambda x: {
-        "autonomous": "🤖 Autonomous (Auto-Pilot)",
-        "supervised": "🧑‍✈️ Supervised (Human-in-Loop)",
-        "manual": "🛠️ Manual Override Only"
-    }[x],
-    index=0
+selected_dev = st.sidebar.selectbox(
+    "Select Industrial Asset:",
+    list(DEVICE_SPECS.keys()),
+    format_func=lambda x: f"{x} - {DEVICE_SPECS[x]['name']}"
 )
-st.session_state.engine.set_decision_mode(op_mode)
+st.session_state.selected_device = selected_dev
 
-# Manual Step Generation Trigger
-manual_step = st.sidebar.button("⚡ Generate Single Telemetry Step", use_container_width=True)
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧪 Fault-Injection Test Lab")
+st.sidebar.caption("Simulate critical industrial anomalies (SRS Section 6 & 11):")
 
-# Generate Reading if Streaming or Manually Triggered
-if st.session_state.stream_active or manual_step or st.session_state.last_reading is None:
-    reading = st.session_state.simulator.generate_next_reading()
-    evaluation = st.session_state.engine.evaluate(reading)
-    
-    # Publish to MQTT Pipeline
-    st.session_state.mqtt_manager.publish(f"iot/telemetry/{reading.device_id}", evaluation)
-    
-    # If autonomous actions triggered, publish to actuator topics
-    for action in evaluation.get("actuator_actions", []):
-        topic = action.get("target_topic", "iot/actuators/general")
-        st.session_state.mqtt_manager.publish(topic, action)
-        
-    # If alerts present, publish to alerts topic
-    for alert in evaluation.get("alerts", []):
-        st.session_state.mqtt_manager.publish(f"iot/alerts/{alert['type'].lower()}", alert)
-        
-    st.session_state.last_reading = reading
-    st.session_state.last_evaluation = evaluation
-    
-    if op_mode == "supervised" and evaluation.get("severity") in ["WARNING", "CRITICAL"]:
-        st.session_state.pending_actions = evaluation.get("actuator_actions", [])
+fault_type = st.sidebar.selectbox(
+    "Fault Profile:",
+    ["NONE", "SPIKE", "DRIFT", "OVERLOAD", "DROP"],
+    help="SPIKE: Critical jump; DRIFT: Creeping rise; OVERLOAD: Extreme power & temp surge; DROP: Sudden pressure/coolant loss."
+)
 
-eval_res = st.session_state.last_evaluation or {}
-reading_res = st.session_state.last_reading
+col_f1, col_f2 = st.sidebar.columns(2)
+with col_f1:
+    if st.button("💥 Inject Fault", use_container_width=True):
+        st.session_state.simulator.inject_fault(selected_dev, fault_type)
+        st.toast(f"Injected {fault_type} on {selected_dev}")
+with col_f2:
+    if st.button("🔄 Clear / Reset", use_container_width=True):
+        st.session_state.simulator.reset_machine(selected_dev)
+        st.toast(f"Reset {selected_dev} to Normal")
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📡 Streaming Controls")
+auto_stream = st.sidebar.toggle("Auto-Stream Telemetry (2s)", value=st.session_state.auto_stream)
+st.session_state.auto_stream = auto_stream
 
-# Top Header Status Bar
-header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
+if st.sidebar.button("⚡ Single Step Pulse", use_container_width=True):
+    st.rerun()
 
-with header_col1:
-    st.title("⚡ Autonomous IoT Decision & Alert Platform")
-    st.caption("Self-Healing Telemetry Pipeline • Edge Intelligence • Dynamic Policy Tuning")
+# 4 Asset Health Status Cards (Top Overview)
+st.markdown("### 🏭 Asset Fleet Health Overview")
+card_cols = st.columns(4)
 
-with header_col2:
-    health = eval_res.get("health_index", 100.0)
-    health_color = "#00FFA3" if health >= 75 else ("#FFAA00" if health >= 50 else "#FF4B4B")
-    st.metric(label="Asset Health Index", value=f"{health}%", delta=f"{health - 100:.1f}%")
+for idx, (dev_id, spec) in enumerate(DEVICE_SPECS.items()):
+    ev = latest_evals.get(dev_id, {})
+    health = ev.get("health_score", 100.0)
+    sev = ev.get("severity", "NORMAL")
+    state = st.session_state.simulator.device_states.get(dev_id, "RUNNING")
+    badge_cls = "status-badge-running" if state == "RUNNING" else "status-badge-fault"
 
-with header_col3:
-    sev = eval_res.get("severity", "NORMAL")
-    badge_class = f"status-badge-{sev.lower()}"
-    st.markdown(f"<div style='margin-top: 15px;'><span class='{badge_class}'>STATE: {sev}</span></div>", unsafe_allow_html=True)
-    st.markdown(f"<small>Mode: <b>{op_mode.upper()}</b></small>", unsafe_allow_html=True)
+    with card_cols[idx]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <b>{dev_id}</b>
+                <span class="{badge_cls}">{state}</span>
+            </div>
+            <small style="color: #A0AEC0;">{spec['name']}</small>
+            <div style="font-size: 1.8em; font-weight: bold; color: {'#00FFA3' if health >= 70 else ('#FFAA00' if health >= 40 else '#FF4B4B')}; margin: 8px 0;">
+                {health}%
+            </div>
+            <small>Active Severity: <b>{sev}</b></small>
+        </div>
+        """, unsafe_allow_html=True)
 
+st.markdown("---")
 
-# Main Tabs
-tabs = st.tabs([
-    "📡 Live Telemetry & Digital Twin",
-    "🧠 Autonomous Decision Console",
-    "⚙️ Dynamic Rules & User Controls",
-    "🔬 Machine Learning Studio",
-    "🔀 Node-RED & MQTT Pipeline",
-    "📊 Grafana Analytics",
-    "🚀 Cloud & GitHub Guide"
+# Main Navigation Tabs
+main_tabs = st.tabs([
+    "📊 Live Cockpit & Telemetry",
+    "🧠 Autonomous Decision Audit Log",
+    "🚨 Alert Lifecycle Manager",
+    "🔬 Machine Learning & Z-Score Analysis",
+    "🗄️ MongoDB Database (aiot_platform)",
+    "⚙️ Manual Actuator Command Console",
+    "📄 Project Report & SRS Specifications"
 ])
 
 
-# TAB 1: Live Telemetry
-with tabs[0]:
-    st.subheader(f"Asset Telemetry: {st.session_state.simulator.device_id}")
+# TAB 1: Live Cockpit & Telemetry
+with main_tabs[0]:
+    cur_spec = DEVICE_SPECS[selected_dev]
+    cur_eval = latest_evals[selected_dev]
+    cur_readings = cur_eval["readings"]
+    units = cur_spec["units"]
 
-    # Top Metric Gauges
-    m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
-    
-    temp_val = reading_res.temperature if reading_res else 55.0
-    vib_val = reading_res.vibration if reading_res else 2.2
-    press_val = reading_res.pressure if reading_res else 4.2
-    curr_val = reading_res.current if reading_res else 22.0
-    humid_val = reading_res.humidity if reading_res else 48.0
+    st.subheader(f"{selected_dev} - {cur_spec['name']} Telemetry Cockpit")
 
-    thresholds = st.session_state.engine.thresholds
-    
-    with m_col1:
-        st.metric(
-            "Temperature",
-            f"{temp_val} °C",
-            delta=f"{temp_val - thresholds['temp_warning']:.1f}° vs Warn" if temp_val > thresholds['temp_warning'] else "Normal",
-            delta_color="inverse"
-        )
-    with m_col2:
-        st.metric(
-            "Vibration (RMS)",
-            f"{vib_val} mm/s",
-            delta=f"{vib_val - thresholds['vibration_warning']:.2f} mm/s" if vib_val > thresholds['vibration_warning'] else "Normal",
-            delta_color="inverse"
-        )
-    with m_col3:
-        st.metric(
-            "Pressure",
-            f"{press_val} bar",
-            delta=f"{press_val - thresholds['pressure_warning']:.2f} bar" if press_val > thresholds['pressure_warning'] else "Normal",
-            delta_color="inverse"
-        )
-    with m_col4:
-        st.metric(
-            "Motor Current",
-            f"{curr_val} A",
-            delta=f"{curr_val - thresholds['current_warning']:.1f} A" if curr_val > thresholds['current_warning'] else "Normal",
-            delta_color="inverse"
-        )
-    with m_col5:
-        st.metric(
-            "Humidity",
-            f"{humid_val} %",
-            delta="Normal"
-        )
+    # Sensor Metric Cards
+    sensor_cols = st.columns(len(cur_spec["primary_sensors"]))
+    for i, s_name in enumerate(cur_spec["primary_sensors"]):
+        val = cur_readings.get(s_name, 0.0)
+        unit = units.get(s_name, "")
+        with sensor_cols[i]:
+            st.metric(label=s_name.replace("_", " ").title(), value=f"{val} {unit}")
 
-    # Historical Telemetry Time Series
-    df_hist = st.session_state.mqtt_manager.get_telemetry_df()
-    
-    if not df_hist.empty and len(df_hist) > 1:
-        c1, c2 = st.columns(2)
-        
-        with c1:
-            fig_temp = px.line(
-                df_hist.tail(40),
-                y="temperature",
-                title="Temperature (°C) with Safety Envelopes",
+    # Live Real-Time Charts
+    buf = st.session_state.telemetry_buffer[selected_dev]
+    if len(buf) > 1:
+        df_plot = pd.DataFrame(buf)
+        c_left, c_right = st.columns(2)
+
+        with c_left:
+            primary_sensor = cur_spec["primary_sensors"][0]
+            fig1 = px.line(
+                df_plot, x="timestamp", y=primary_sensor,
+                title=f"{primary_sensor.replace('_', ' ').title()} ({units.get(primary_sensor, '')})",
                 color_discrete_sequence=["#FF7675"]
             )
-            fig_temp.add_hline(y=thresholds["temp_warning"], line_dash="dash", line_color="#FFAA00", annotation_text="Warning")
-            fig_temp.add_hline(y=thresholds["temp_critical"], line_dash="solid", line_color="#FF4B4B", annotation_text="Critical")
-            fig_temp.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20), height=280)
-            st.plotly_chart(fig_temp, use_container_width=True)
+            # Add threshold line if exists
+            crit_lim = cur_spec["limits"].get("temp_critical") or cur_spec["limits"].get("gas_critical")
+            if crit_lim:
+                fig1.add_hline(y=crit_lim, line_dash="dash", line_color="#FF4B4B", annotation_text=f"Critical Limit ({crit_lim})")
+            fig1.update_layout(template="plotly_dark", height=280, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig1, use_container_width=True)
 
-        with c2:
-            fig_vib = px.line(
-                df_hist.tail(40),
-                y="vibration",
-                title="Bearing Vibration (mm/s RMS)",
+        with c_right:
+            secondary_sensor = cur_spec["primary_sensors"][1]
+            fig2 = px.line(
+                df_plot, x="timestamp", y=secondary_sensor,
+                title=f"{secondary_sensor.replace('_', ' ').title()} ({units.get(secondary_sensor, '')})",
                 color_discrete_sequence=["#74B9FF"]
             )
-            fig_vib.add_hline(y=thresholds["vibration_warning"], line_dash="dash", line_color="#FFAA00", annotation_text="Warning")
-            fig_vib.add_hline(y=thresholds["vibration_critical"], line_dash="solid", line_color="#FF4B4B", annotation_text="Critical")
-            fig_vib.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20), height=280)
-            st.plotly_chart(fig_vib, use_container_width=True)
-
-        c3, c4 = st.columns(2)
-        with c3:
-            fig_press = px.line(
-                df_hist.tail(40),
-                y="pressure",
-                title="Hydraulic Line Pressure (bar)",
-                color_discrete_sequence=["#A29BFE"]
-            )
-            fig_press.add_hline(y=thresholds["pressure_warning"], line_dash="dash", line_color="#FFAA00", annotation_text="Warning")
-            fig_press.add_hline(y=thresholds["pressure_critical"], line_dash="solid", line_color="#FF4B4B", annotation_text="Critical")
-            fig_press.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20), height=280)
-            st.plotly_chart(fig_press, use_container_width=True)
-
-        with c4:
-            fig_health = px.line(
-                df_hist.tail(40),
-                y="health_index",
-                title="Asset Health Index Degradation Curve",
-                color_discrete_sequence=["#00FFA3"]
-            )
-            fig_health.add_hline(y=50.0, line_dash="dash", line_color="#FF4B4B", annotation_text="Critical Trip")
-            fig_health.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20), height=280)
-            st.plotly_chart(fig_health, use_container_width=True)
+            crit_lim2 = cur_spec["limits"].get("vib_critical") or cur_spec["limits"].get("tension_critical") or cur_spec["limits"].get("smoke_critical")
+            if crit_lim2:
+                fig2.add_hline(y=crit_lim2, line_dash="dash", line_color="#FF4B4B", annotation_text=f"Limit ({crit_lim2})")
+            fig2.update_layout(template="plotly_dark", height=280, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("Accumulating telemetry samples... Toggle simulation or click 'Generate Single Telemetry Step' to view historical charts.")
+        st.info("Gathering live telemetry data packets...")
 
 
-# TAB 2: Autonomous Decision Console
-with tabs[1]:
-    st.subheader("🤖 Autonomous Decision Engine & Actuator Dispatches")
-    
-    col_act, col_alert = st.columns([1.2, 1])
+# TAB 2: Decision Audit Log
+with main_tabs[1]:
+    st.subheader("📜 Explainable Autonomous Decision Audit Log")
+    st.caption("Closed-loop automatic interventions executed to protect machinery without human delay.")
 
-    with col_act:
-        st.markdown("#### Active Actuator Commands")
-        actions = eval_res.get("actuator_actions", [])
-        if actions:
-            for act in actions:
-                st.markdown(f"""
-                <div class="actuator-box">
-                    <span style="font-size: 1.1em; font-weight: bold; color: #00FFA3;">⚡ {act.get('actuator')}</span> &rarr; <code>{act.get('action')}</code><br/>
-                    <small style="color: #A0AEC0;">Rationale: {act.get('reason')}</small><br/>
-                    <small style="color: #63B3ED;">MQTT Topic: <code>{act.get('target_topic')}</code></small>
+    decisions = list(st.session_state.engine.decision_history)
+    if decisions:
+        for dec in decisions[-8:][::-1]:
+            st.markdown(f"""
+            <div class="decision-card">
+                <div style="display:flex; justify-content:space-between;">
+                    <b>⚡ {dec['action_taken']}</b> on <code>{dec['device_id']}</code>
+                    <small>{time.strftime('%H:%M:%S', time.localtime(dec['timestamp']))}</small>
                 </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.success("All systems operating within nominal envelopes. No actuator intervention needed.")
-
-        # Supervised Mode Operator Approval UI
-        if op_mode == "supervised" and st.session_state.pending_actions:
-            st.warning("⚠️ Supervised Mode: Operator confirmation required before actuator deployment.")
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                if st.button("✅ Approve & Dispatch All Actions", use_container_width=True):
-                    for pa in st.session_state.pending_actions:
-                        st.session_state.mqtt_manager.publish(pa.get("target_topic", "iot/actuators/approved"), pa)
-                    st.success("Operator approved! Commands dispatched over MQTT.")
-                    st.session_state.pending_actions = []
-            with btn_col2:
-                if st.button("❌ Reject / Dismiss", use_container_width=True):
-                    st.session_state.pending_actions = []
-                    st.info("Actions dismissed by operator.")
-
-        # Manual Override Panel
-        if op_mode == "manual":
-            st.markdown("#### 🛠️ Manual Actuator Override Console")
-            btn1, btn2, btn3, btn4 = st.columns(4)
-            with btn1:
-                if st.button("❄️ Start Cooling", use_container_width=True):
-                    st.session_state.mqtt_manager.publish("iot/actuators/cooling", {"command": "MANUAL_COOLING_CYCLE", "source": "USER_OVERRIDE"})
-                    st.toast("Dispatched: MANUAL_COOLING_CYCLE")
-            with btn2:
-                if st.button("💨 Open Valve", use_container_width=True):
-                    st.session_state.mqtt_manager.publish("iot/actuators/valves", {"command": "MANUAL_VALVE_RELEASE", "source": "USER_OVERRIDE"})
-                    st.toast("Dispatched: MANUAL_VALVE_RELEASE")
-            with btn3:
-                if st.button("🛑 Derate Motor", use_container_width=True):
-                    st.session_state.mqtt_manager.publish("iot/actuators/motors", {"command": "MANUAL_DERATE_50%", "source": "USER_OVERRIDE"})
-                    st.toast("Dispatched: MANUAL_DERATE_50%")
-            with btn4:
-                if st.button("🔄 Reset Alerts", use_container_width=True):
-                    st.session_state.mqtt_manager.publish("iot/control/reset", {"command": "SYSTEM_ALERTS_RESET", "source": "USER_OVERRIDE"})
-                    st.toast("Dispatched: SYSTEM_ALERTS_RESET")
-
-    with col_alert:
-        st.markdown("#### 🚨 Real-Time Alerts")
-        alerts = eval_res.get("alerts", [])
-        if alerts:
-            for al in alerts:
-                alert_type = al.get("type", "ALERT")
-                if "CRITICAL" in alert_type:
-                    st.error(f"🔴 **{alert_type}**: {al.get('msg')}")
-                elif "WARNING" in alert_type:
-                    st.warning(f"🟡 **{alert_type}**: {al.get('msg')}")
-                else:
-                    st.info(f"🔵 **{alert_type}**: {al.get('msg')}")
-        else:
-            st.success("No active alerts. Zero critical anomalies detected.")
-
-    st.markdown("---")
-    st.markdown("#### 📜 Autonomous Decision Audit Log")
-    if len(st.session_state.mqtt_manager.decision_history) > 0:
-        decision_df = pd.DataFrame(list(st.session_state.mqtt_manager.decision_history)).tail(15)
-        st.dataframe(decision_df, use_container_width=True)
+                <p style="margin: 6px 0; color: #E2E8F0;"><b>Explanation:</b> {dec['explanation']}</p>
+                <small style="color: #00FFA3;"><b>Actuator Updates:</b> {json.dumps(dec['actuator_updates'])}</small>
+            </div>
+            """, unsafe_allow_html=True)
     else:
-        st.caption("No decision events logged yet.")
+        st.success("All systems nominal. No autonomous protective trips triggered.")
 
 
-# TAB 3: Dynamic Rules & User Controls
-with tabs[2]:
-    st.subheader("⚙️ Dynamic Operating Envelopes & User Threshold Customization")
-    st.markdown("Customize autonomous trigger thresholds in real-time. Changes apply instantly without restarting the pipeline.")
-
-    with st.form("threshold_form"):
-        col_t1, col_t2 = st.columns(2)
-        
-        with col_t1:
-            st.markdown("##### 🌡️ Thermal Limits")
-            new_temp_warn = st.slider("Temperature Warning Threshold (°C)", 40.0, 95.0, float(thresholds["temp_warning"]), 1.0)
-            new_temp_crit = st.slider("Temperature Critical Threshold (°C)", 50.0, 110.0, float(thresholds["temp_critical"]), 1.0)
-
-            st.markdown("##### ⚙️ Vibration Limits")
-            new_vib_warn = st.slider("Vibration Warning (mm/s RMS)", 1.0, 10.0, float(thresholds["vibration_warning"]), 0.1)
-            new_vib_crit = st.slider("Vibration Critical (mm/s RMS)", 2.0, 15.0, float(thresholds["vibration_critical"]), 0.1)
-
-        with col_t2:
-            st.markdown("##### 💥 Hydraulic Pressure Limits")
-            new_press_warn = st.slider("Pressure Warning Threshold (bar)", 3.0, 9.0, float(thresholds["pressure_warning"]), 0.1)
-            new_press_crit = st.slider("Pressure Critical Threshold (bar)", 4.0, 12.0, float(thresholds["pressure_critical"]), 0.1)
-
-            st.markdown("##### ⚡ Motor Current Limits")
-            new_curr_warn = st.slider("Motor Current Warning (A)", 15.0, 50.0, float(thresholds["current_warning"]), 1.0)
-            new_curr_crit = st.slider("Motor Current Critical (A)", 25.0, 70.0, float(thresholds["current_critical"]), 1.0)
-
-        st.markdown("---")
-        st.markdown("##### 🔔 Alert Escalation Webhook Integration")
-        webhook_url = st.text_input("Dispatch Webhook URL (Slack / Discord / Custom Endpoint):", value="https://httpbin.org/post")
-
-        submitted = st.form_submit_button("💾 Save & Apply Dynamic Policy to IoT Network", use_container_width=True)
-        if submitted:
-            new_rules = {
-                "temp_warning": new_temp_warn,
-                "temp_critical": new_temp_crit,
-                "vibration_warning": new_vib_warn,
-                "vibration_critical": new_vib_crit,
-                "pressure_warning": new_press_warn,
-                "pressure_critical": new_press_crit,
-                "current_warning": new_curr_warn,
-                "current_critical": new_curr_crit,
-            }
-            st.session_state.engine.update_thresholds(new_rules)
-            # Publish policy update to MQTT network
-            st.session_state.mqtt_manager.publish("iot/control/policy_update", {
-                "updated_by": "USER",
-                "timestamp": datetime.utcnow().isoformat(),
-                "thresholds": new_rules,
-                "webhook_url": webhook_url
-            })
-            st.success("✅ Threshold rules updated successfully and broadcasted across MQTT mesh!")
-
-
-# TAB 4: Machine Learning Studio
-with tabs[3]:
-    st.subheader("🔬 Machine Learning Studio & Anomaly Detection")
-    st.markdown("Unsupervised multivariate anomaly detection utilizing **Isolation Forest** to identify subtle equipment degradation before hard thresholds are breached.")
-
-    col_ml1, col_ml2 = st.columns([1, 2])
+# TAB 3: Alert Lifecycle Manager
+with main_tabs[2]:
+    st.subheader("🚨 Incident & Alert Lifecycle Management (ACTIVE → ACKNOWLEDGED → RESOLVED)")
     
-    with col_ml1:
-        st.markdown("##### Model Configuration")
-        st.write(f"**Algorithm:** `Isolation Forest` (Scikit-Learn)")
-        st.write(f"**Estimators:** `100 Trees`")
-        st.write(f"**Current Contamination Factor:** `{st.session_state.engine.contamination:.2f}`")
-        
-        ml_score = eval_res.get("ml_confidence_score", 0.5)
-        is_ano = eval_res.get("ml_anomaly", False)
-        
-        st.metric(
-            label="Live Anomaly Probability Score",
-            value=f"{ml_score:.3f}",
-            delta="Anomaly Detected!" if is_ano else "Nominal Distribution",
-            delta_color="inverse" if is_ano else "normal"
-        )
-
-        st.markdown("##### Retune Sensitivity")
-        new_contamination = st.slider("Contamination (Expected Anomaly %)", 0.01, 0.20, float(st.session_state.engine.contamination), 0.01)
-        if st.button("⚡ Retrain & Recalibrate Baseline Model", use_container_width=True):
-            st.session_state.engine.contamination = new_contamination
-            st.session_state.engine.train_baseline_model(n_samples=1000)
-            st.success(f"Model recalibrated with contamination factor = {new_contamination}!")
-
-    with col_ml2:
-        st.markdown("##### Multivariate Anomaly Scatter Space (Temperature vs. Vibration)")
-        # Create synthetic evaluation dataset to plot decision boundary
-        np.random.seed(42)
-        n_pts = 200
-        normal_t = np.random.normal(55, 4.5, n_pts)
-        normal_v = np.random.normal(2.2, 0.5, n_pts)
-        
-        plot_df = pd.DataFrame({
-            "temperature": normal_t,
-            "vibration": normal_v,
-            "category": ["Baseline Normal"] * n_pts
-        })
-        
-        # Add current live telemetry point
-        if reading_res:
-            cur_cat = "🚨 Anomaly" if is_ano else "🟢 Live Telemetry"
-            plot_df = pd.concat([
-                plot_df,
-                pd.DataFrame({
-                    "temperature": [reading_res.temperature],
-                    "vibration": [reading_res.vibration],
-                    "category": [cur_cat]
-                })
-            ], ignore_index=True)
-
-        fig_scatter = px.scatter(
-            plot_df,
-            x="temperature",
-            y="vibration",
-            color="category",
-            color_discrete_map={
-                "Baseline Normal": "#636EFA",
-                "🟢 Live Telemetry": "#00FFA3",
-                "🚨 Anomaly": "#FF4B4B"
-            },
-            title="Isolation Forest Multivariate Clustering",
-            labels={"temperature": "Temperature (°C)", "vibration": "Vibration (mm/s)"}
-        )
-        fig_scatter.update_traces(marker=dict(size=8, opacity=0.8))
-        if reading_res:
-            fig_scatter.add_trace(go.Scatter(
-                x=[reading_res.temperature],
-                y=[reading_res.vibration],
-                mode="markers+text",
-                marker=dict(size=18, color="#00FFA3" if not is_ano else "#FF4B4B", symbol="diamond"),
-                text=["Current Asset"],
-                textposition="top center",
-                name="Live Asset Position"
-            ))
-        fig_scatter.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=40, b=20))
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-
-# TAB 5: Node-RED & MQTT Pipeline
-with tabs[4]:
-    st.subheader("🔀 Node-RED Event Orchestration & MQTT Message Bus")
-    
-    col_n1, col_n2 = st.columns([1, 1])
-    
-    with col_n1:
-        st.markdown("##### Node-RED Architecture Flow")
-        st.info("""
-        **Pipeline Flow:**
-        1. **`iot/telemetry/#` Ingest**: Sensor packets received from Edge brokers.
-        2. **Autonomous Matrix Function Node**: Analyzes envelopes & ML flags.
-        3. **Actuator Topic Dispatch**: Dispatches targeted mitigation payloads.
-        4. **Alert Webhook**: Triggers immediate external notifications.
-        """)
-        
-        with open("node_red/flows.json", "r") as f:
-            flows_content = f.read()
-            
-        st.download_button(
-            label="📥 Download Production Node-RED Flow (`flows.json`)",
-            data=flows_content,
-            file_name="node_red_iot_autonomous_flows.json",
-            mime="application/json",
-            use_container_width=True
-        )
-
-        st.markdown("##### Manual MQTT Publish Sandbox")
-        with st.form("mqtt_test_form"):
-            sandbox_topic = st.text_input("Target Topic:", value="iot/control/manual_override")
-            sandbox_payload = st.text_area("JSON Payload:", value='{"action": "COOLING_TEST", "power_pct": 80}')
-            if st.form_submit_button("🚀 Publish Test Message to MQTT"):
-                try:
-                    payload_json = json.loads(sandbox_payload)
-                    st.session_state.mqtt_manager.publish(sandbox_topic, payload_json)
-                    st.success(f"Published to `{sandbox_topic}`!")
-                except Exception as e:
-                    st.error(f"Invalid JSON: {e}")
-
-    with col_n2:
-        st.markdown("##### Live MQTT Packet Stream")
-        raw_msgs = list(st.session_state.mqtt_manager.raw_message_log)
-        if raw_msgs:
-            recent_msgs = raw_msgs[-10:][::-1]
-            for msg in recent_msgs:
-                with st.expander(f"Topic: {msg['topic']} [{msg['timestamp']}]", expanded=False):
-                    st.json(msg["data"])
-        else:
-            st.caption("Waiting for incoming MQTT packets...")
-
-
-# TAB 6: Grafana Analytics
-with tabs[5]:
-    st.subheader("📊 Grafana Telemetry Dashboard Integration")
-    st.markdown("High-resolution telemetry dashboards powered by Grafana panels.")
-
-    g_col1, g_col2 = st.columns([1.5, 1])
-    
-    with g_col1:
-        st.markdown("##### Live Embedded Grafana-Style Gauges")
-        # Visual interactive gauge using Plotly
-        fig_g1 = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=health,
-            title={'text': "Asset Health Score (%)"},
-            delta={'reference': 100},
-            gauge={
-                'axis': {'range': [0, 100]},
-                'bar': {'color': health_color},
-                'steps': [
-                    {'range': [0, 50], 'color': "rgba(255, 75, 75, 0.2)"},
-                    {'range': [50, 75], 'color': "rgba(255, 170, 0, 0.2)"},
-                    {'range': [75, 100], 'color': "rgba(0, 255, 163, 0.2)"}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 50
-                }
-            }
-        ))
-        fig_g1.update_layout(template="plotly_dark", height=280, margin=dict(l=20, r=20, t=30, b=20))
-        st.plotly_chart(fig_g1, use_container_width=True)
-
-    with g_col2:
-        st.markdown("##### Export Grafana Dashboard Config")
-        st.write("Import this pre-configured JSON dashboard directly into your enterprise Grafana instance.")
-        
-        with open("grafana/dashboards/iot_autonomous_dashboard.json", "r") as gf:
-            grafana_json = gf.read()
-
-        st.download_button(
-            label="📥 Download Grafana Dashboard JSON",
-            data=grafana_json,
-            file_name="grafana_iot_autonomous_dashboard.json",
-            mime="application/json",
-            use_container_width=True
-        )
-
-        st.markdown("##### Quick Docker Launch Command")
-        st.code("docker compose up -d\n# Opens Grafana at http://localhost:3000 (admin/admin)", language="bash")
-
-
-# TAB 7: Cloud Deployment & GitHub Setup Guide
-with tabs[6]:
-    st.subheader("🚀 Upload to GitHub & Deploy to Streamlit Community Cloud")
-    st.markdown("Deploy this platform to the cloud so **anyone can access it from any phone, tablet, or laptop via a public URL**!")
-
-    step_c1, step_c2 = st.columns(2)
-
-    with step_c1:
-        st.markdown("### Step 1: Push to GitHub")
-        st.markdown("""
-        1. Create a new repository on [GitHub](https://github.com/new), e.g. `iot-autonomous-decision-platform`.
-        2. In your terminal inside this project directory, run:
-        """)
-        st.code("""git init
-git add .
-git commit -m "Initial commit: Autonomous IoT Decision Platform"
-git branch -M main
-git remote add origin https://github.com/<YOUR-USERNAME>/<YOUR-REPO-NAME>.git
-git push -u origin main""", language="bash")
-
-    with step_c2:
-        st.markdown("### Step 2: Deploy to Streamlit Cloud (Free & Instant)")
-        st.markdown("""
-        1. Go to [share.streamlit.io](https://share.streamlit.io/) and log in with your GitHub account.
-        2. Click **New App**.
-        3. Select your repository: `<YOUR-USERNAME>/<YOUR-REPO-NAME>`.
-        4. Main file path: `app.py`.
-        5. Click **Deploy!**
-        
-        🎉 **Your app is now live with a public HTTPS link accessible on any browser, mobile phone, or desktop worldwide!**
-        """)
+    active_alerts = st.session_state.engine.active_alerts
+    if active_alerts:
+        for a_id, alt in list(active_alerts.items()):
+            col_a1, col_a2, col_a3 = st.columns([3, 1, 1])
+            with col_a1:
+                st.error(f"🔴 **[{alt['status']}] {alt['device_id']}**: {alt['message']}")
+                st.caption(f"Alert ID: `{alt['alert_id']}` | Timestamp: {alt['timestamp']}")
+            with col_a2:
+                if alt["status"] == "ACTIVE":
+                    if st.button("Acknowledge", key=f"ack_{a_id}"):
+                        st.session_state.engine.update_alert_status(a_id, "ACKNOWLEDGED")
+                        st.rerun()
+            with col_a3:
+                if st.button("Resolve Incident", key=f"res_{a_id}"):
+                    st.session_state.engine.update_alert_status(a_id, "RESOLVED")
+                    st.session_state.simulator.reset_machine(alt["device_id"])
+                    st.rerun()
+    else:
+        st.success("Zero unresolved incidents. Incident queue is empty.")
 
     st.markdown("---")
-    st.markdown("### 🐳 Optional: Local Full-Stack Docker Deployment")
-    st.markdown("To run **Mosquitto + Node-RED + Grafana + Streamlit** all together locally:")
-    st.code("docker compose up --build", language="bash")
+    st.markdown("#### Historical Alert Log")
+    all_alerts = list(st.session_state.engine.alert_history)
+    if all_alerts:
+        st.dataframe(pd.DataFrame(all_alerts).tail(15), use_container_width=True)
 
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #718096; font-size: 0.9em;'>"
-    "Autonomous IoT Decision & Alert Management Platform • Built with MQTT, Node-RED, Python, ML, Grafana & Streamlit"
-    "</div>",
-    unsafe_allow_html=True
-)
 
-# Rerun loop for live streaming telemetry if active
-if st.session_state.stream_active:
-    time.sleep(stream_speed)
+# TAB 4: ML & Rolling Z-Score
+with main_tabs[3]:
+    st.subheader("🔬 Machine Learning Anomaly Detection (Isolation Forest & Rolling Z-Score)")
+    cur_ml = cur_eval["ml_evaluation"]
+    
+    col_m1, col_m2 = st.columns([1, 1.5])
+    with col_m1:
+        st.metric(label="Calculated ML Risk Score", value=f"{cur_ml['risk_score']:.3f} / 1.000")
+        st.write(f"**Anomaly Classification:** `{'ANOMALY' if cur_ml['is_anomaly'] else 'NORMAL'}`")
+        st.write(f"**Top Deviating Contributor:** `{cur_ml.get('top_contributor') or 'None'}`")
+
+    with col_m2:
+        st.markdown("##### Rolling Z-Scores (Sensor Deviations from Baseline)")
+        contribs = cur_ml.get("feature_contributors", {})
+        if contribs:
+            z_df = pd.DataFrame({"Sensor": list(contribs.keys()), "Z-Score": list(contribs.values())})
+            fig_z = px.bar(z_df, x="Sensor", y="Z-Score", color="Z-Score", color_continuous_scale="RdYlGn_r", title="Sensor Z-Score Contributions")
+            fig_z.update_layout(template="plotly_dark", height=260, margin=dict(l=20, r=20, t=30, b=20))
+            st.plotly_chart(fig_z, use_container_width=True)
+        else:
+            st.caption("Collecting rolling buffer to compute Z-scores...")
+
+
+# TAB 5: MongoDB Status
+with main_tabs[4]:
+    st.subheader("🗄️ MongoDB Database Inspection (`aiot_platform`)")
+    db_status = st.session_state.db.get_status()
+    
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        st.write(f"**Database Name:** `{db_status['database']}`")
+        st.write(f"**Storage Engine Status:** `{db_status['status']}`")
+        st.write(f"**Connected to Local MongoDB (Port 27017):** `{db_status['connected_to_mongodb_daemon']}`")
+    with col_d2:
+        st.markdown("##### Five Collection Document Counts:")
+        for col_name, cnt in db_status["collection_counts"].items():
+            st.write(f"- Collection `{col_name}`: **{cnt}** documents")
+
+    st.markdown("---")
+    st.markdown("##### Recent Documents from `telemetry` Collection")
+    recent_docs = st.session_state.db.get_latest("telemetry", limit=5)
+    st.json(recent_docs)
+
+
+# TAB 6: Manual Command Console
+with main_tabs[5]:
+    st.subheader(f"⚙️ Operator Control Console: {selected_dev}")
+    st.caption("Send manual START, STOP, or THROTTLE commands over MQTT.")
+
+    c_b1, c_b2, c_b3, c_b4 = st.columns(4)
+    with c_b1:
+        if st.button("🟢 START Machine", use_container_width=True):
+            st.session_state.simulator.device_states[selected_dev] = "RUNNING"
+            st.session_state.mqtt.publish(f"iot/commands/{selected_dev}", {"command": "START", "user": "Chinmay Prakash"})
+            st.toast(f"Sent START command to {selected_dev}")
+    with c_b2:
+        if st.button("🔴 STOP Machine", use_container_width=True):
+            st.session_state.simulator.device_states[selected_dev] = "STOPPED"
+            st.session_state.mqtt.publish(f"iot/commands/{selected_dev}", {"command": "STOP", "user": "Chinmay Prakash"})
+            st.toast(f"Sent STOP command to {selected_dev}")
+    with c_b3:
+        if st.button("🟡 THROTTLE (50%)", use_container_width=True):
+            st.session_state.mqtt.publish(f"iot/commands/{selected_dev}", {"command": "THROTTLE_50%", "user": "Chinmay Prakash"})
+            st.toast(f"Sent THROTTLE command to {selected_dev}")
+    with c_b4:
+        if st.button("🔄 Emergency Reset", use_container_width=True):
+            st.session_state.simulator.reset_machine(selected_dev)
+            st.toast(f"Reset {selected_dev}")
+
+
+# TAB 7: SRS Document
+with main_tabs[6]:
+    st.subheader("📄 Mini Project Report & SRS Specifications")
+    st.markdown("""
+    | Field | Detail |
+    |---|---|
+    | **Project Title** | Autonomous IoT Decision and Alert Platform |
+    | **Student Name** | Chinmay Prakash |
+    | **Roll Number** | 2400320310060 |
+    | **Department** | Electronics and Communication Engineering (ECE) |
+    | **College** | ABES Engineering College |
+    | **Project Guide** | Ashish Kumar |
+    | **Year / Batch** | B.Tech 3rd Year, Batch 2024–28 |
+    | **Academic Year** | 2026–27 |
+
+    #### Autonomous Protective Actions
+    - **`MCH-007` (Bottle Filling Machine)**: Temp ≥ 88°C, Vibration ≥ 4.0 mm/s, Pressure ≤ 4.0 bar &rarr; `EMERGENCY_FAULT_STOP`
+    - **`CNC-003` (Precision Milling)**: Spindle Temp > 85°C, Vibration > 5.5 mm/s &rarr; `SPINDLE_SAFETY_TRIP`
+    - **`CONV-012` (Logistics Conveyor)**: Motor Temp > 80°C, Belt Tension > 620 N &rarr; `EMERGENCY_CONVEYOR_HALT`
+    - **`ENV-001` (Air Quality & Safety Unit)**: Gas > 250 ppm, Smoke > 80 ppm &rarr; `HAZMAT_EVACUATION_PURGE`
+    """)
+
+# Streaming Loop
+if st.session_state.auto_stream:
+    time.sleep(2.0)
     st.rerun()
